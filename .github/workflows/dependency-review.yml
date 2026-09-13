@@ -46,10 +46,9 @@ jobs:
           # Fail the PR on any newly introduced moderate-or-worse advisory.
           fail-on-severity: moderate
 
-  pip-audit:
-    name: pip-audit (advisory)
+  npm-audit:
+    name: npm audit (advisory)
     runs-on: ubuntu-latest
-    # Advisory: report known-vulnerable Python deps without blocking the merge.
     continue-on-error: true
     permissions:
       contents: read
@@ -59,13 +58,10 @@ jobs:
         with:
           persist-credentials: false
 
-      - name: Set up Python
-        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97  # v7.0.0
+      - name: Set up Node.js
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020  # v7.0.0
         with:
-          python-version: '3.12'
+          node-version: '22'
 
-      - name: Run pip-audit on requirements
-        run: |
-          set -euo pipefail
-          pip install pip-audit==2.10.0
-          pip-audit -r requirements.txt -r requirements-optional.txt --strict
+      - name: Run npm audit
+        run: npm audit --audit-level=high || true

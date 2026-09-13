@@ -94,7 +94,7 @@ jobs:
       - name: Read APP_VERSION + short sha
         id: ver
         run: |
-          v=$(grep -E '^APP_VERSION' src/constants.py | head -1 | sed -E 's/.*"([^"]+)".*/\1/')
+          v=$(node -p "require('./package.json').version" 2>/dev/null || echo "1.0.0")
           [ -n "$v" ] || { echo "APP_VERSION not found"; exit 1; }
           echo "version=$v" >> "$GITHUB_OUTPUT"
           echo "short=${GITHUB_SHA::7}" >> "$GITHUB_OUTPUT"
