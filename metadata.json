@@ -1,0 +1,8 @@
+{
+  "name": "Odysseus Chat",
+  "description": "A self-hosted AI workspace for chat, agents, research, documents, email, notes, calendar, and local model workflows.",
+  "requestFramePermissions": [],
+  "majorCapabilities": [
+    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
+  ]
+}

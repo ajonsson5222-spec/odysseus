@@ -194,14 +194,29 @@ function initRailHoverLabels() {
 }
 
 // Redirect to login on 401 from any fetch
-const _origFetch = window.fetch;
-window.fetch = async function(...args) {
-  const res = await _origFetch.apply(this, args);
-  if (res.status === 401 && !String(args[0]).includes('/api/auth/')) {
-    window.location.href = '/login';
+try {
+  const _origFetch = window.fetch;
+  if (_origFetch) {
+    const _wrappedFetch = async function(...args) {
+      const res = await _origFetch.apply(this, args);
+      if (res && res.status === 401 && !String(args[0]).includes('/api/auth/')) {
+        window.location.href = '/login';
+      }
+      return res;
+    };
+    try {
+      window.fetch = _wrappedFetch;
+    } catch (_) {
+      try {
+        Object.defineProperty(window, 'fetch', {
+          value: _wrappedFetch,
+          writable: true,
+          configurable: true,
+        });
+      } catch (_) {}
+    }
   }
-  return res;
-};
+} catch (_) {}
 
 // Search settings
 

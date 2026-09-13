@@ -23,20 +23,25 @@
 
 ---
 
-## Quick Start
+## Quick Start (Docker on VM)
 
-> `dev` is the default branch and gets the newest changes first. Use [`main`](https://github.com/odysseus-dev/odysseus/tree/main) if you want the more curated branch.
+Run with a single command on your VM:
 
 ```bash
-git clone https://github.com/odysseus-dev/odysseus.git
+# 1. Clone or copy project files to your VM
 cd odysseus
+
+# 2. Configure environment (optional Gemini API key and port)
 cp .env.example .env
+
+# 3. Start the container in background
 docker compose up -d --build
 ```
 
-Open `http://localhost:7000` when the containers are healthy. The first admin password is printed in `docker compose logs odysseus`.
+Access the web interface at `http://<your-vm-ip>:3000`.
 
-Native installs, GPU notes, Windows/macOS instructions, HTTPS, and configuration live in the [setup guide](website/setup.md).
+- **Persistent Data**: All sessions, notes, tasks, calendar events, and settings are automatically stored in `./data`.
+- **Custom Port**: To run on a different host port, set `PORT=8080` in `.env` or run `PORT=8080 docker compose up -d`.
 
 ## Features
 
