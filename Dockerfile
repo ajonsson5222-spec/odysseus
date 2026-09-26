@@ -34,13 +34,13 @@ RUN if [ -f package-lock.json ]; then npm ci --omit=dev; else npm install --omit
 COPY --from=builder /app/dist ./dist
 COPY static ./static
 
-# Create data directory with permissions for node user
-RUN mkdir -p /app/data && chown -R node:node /app/data
-
-USER node
+# Copy entrypoint script to initialize data directories and ensure volume permissions
+COPY docker-entrypoint.sh /usr/local/bin/
+RUN chmod +x /usr/local/bin/docker-entrypoint.sh && mkdir -p /app/data/uploads /app/data/documents
 
 EXPOSE 3000
 
 VOLUME ["/app/data"]
 
+ENTRYPOINT ["docker-entrypoint.sh"]
 CMD ["node", "dist/server.cjs"]

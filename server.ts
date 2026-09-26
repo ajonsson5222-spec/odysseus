@@ -137,8 +137,125 @@ let appSettings = {
   theme: "one-dark",
 };
 
-const documents: Array<{ id: string; title: string; content: string; updated_at: string }> = [];
+interface DocumentItem {
+  id: string;
+  session_id?: string;
+  session_name?: string;
+  title: string;
+  content: string;
+  current_content?: string;
+  language?: string;
+  preview?: string;
+  version_count?: number;
+  is_active?: boolean;
+  archived?: boolean;
+  created_at?: string;
+  updated_at: string;
+  source_email_uid?: string | null;
+  source_email_folder?: string | null;
+  source_email_account_id?: string | null;
+  source_email_message_id?: string | null;
+}
+
+const documents: Array<DocumentItem> = [];
 const memoryItems: Array<{ id: string; key: string; value: string; created_at: string }> = [];
+
+export interface ModelEndpoint {
+  id: string;
+  name: string;
+  base_url: string;
+  api_key?: string;
+  api_key_fingerprint?: string;
+  has_key?: boolean;
+  provider?: string;
+  is_enabled: boolean;
+  online: boolean;
+  category: "local" | "api";
+  model_type: "llm" | "image";
+  models?: string[];
+  models_display?: string[];
+  models_extra?: string[];
+  models_extra_display?: string[];
+  model_count?: number;
+  status?: string;
+  ping_error?: string | null;
+}
+
+const defaultModelEndpoints: ModelEndpoint[] = [
+  {
+    id: "gemini-cloud",
+    name: "Google Gemini",
+    base_url: "https://generativelanguage.googleapis.com",
+    provider: "google",
+    is_enabled: true,
+    online: true,
+    category: "api",
+    model_type: "llm",
+    models: ["gemini-2.5-flash", "gemini-2.5-pro", "gemini-2.0-flash", "gemini-1.5-flash"],
+    models_display: ["Gemini 2.5 Flash", "Gemini 2.5 Pro", "Gemini 2.0 Flash", "Gemini 1.5 Flash"],
+    model_count: 4,
+    has_key: Boolean(process.env.GEMINI_API_KEY),
+  },
+];
+
+if (process.env.GROQ_API_KEY) {
+  defaultModelEndpoints.push({
+    id: "groq-cloud",
+    name: "Groq",
+    base_url: "https://api.groq.com/openai/v1",
+    api_key: process.env.GROQ_API_KEY,
+    api_key_fingerprint: process.env.GROQ_API_KEY.slice(0, 4) + "...",
+    has_key: true,
+    provider: "groq",
+    is_enabled: true,
+    online: true,
+    category: "api",
+    model_type: "llm",
+    models: ["llama-3.3-70b-versatile", "llama-3.1-8b-instant", "mixtral-8x7b-32768"],
+    models_display: ["Llama 3.3 70B", "Llama 3.1 8B", "Mixtral 8x7B"],
+    model_count: 3,
+  });
+}
+
+if (process.env.OPENAI_API_KEY) {
+  defaultModelEndpoints.push({
+    id: "openai-cloud",
+    name: "OpenAI",
+    base_url: "https://api.openai.com/v1",
+    api_key: process.env.OPENAI_API_KEY,
+    api_key_fingerprint: process.env.OPENAI_API_KEY.slice(0, 4) + "...",
+    has_key: true,
+    provider: "openai",
+    is_enabled: true,
+    online: true,
+    category: "api",
+    model_type: "llm",
+    models: ["gpt-4o", "gpt-4o-mini", "o3-mini"],
+    models_display: ["GPT-4o", "GPT-4o Mini", "o3 Mini"],
+    model_count: 3,
+  });
+}
+
+if (process.env.OLLAMA_HOST || process.env.LLM_HOST) {
+  const host = process.env.OLLAMA_HOST || process.env.LLM_HOST || "http://localhost:11434";
+  const baseUrl = host.endsWith("/v1") ? host : `${host.replace(/\/+$/, "")}/v1`;
+  defaultModelEndpoints.push({
+    id: "ollama-local",
+    name: "Ollama (Local)",
+    base_url: baseUrl,
+    has_key: false,
+    provider: "ollama",
+    is_enabled: true,
+    online: true,
+    category: "local",
+    model_type: "llm",
+    models: ["llama3", "mistral", "qwen2.5"],
+    models_display: ["Llama 3", "Mistral", "Qwen 2.5"],
+    model_count: 3,
+  });
+}
+
+const modelEndpoints: Array<ModelEndpoint> = [...defaultModelEndpoints];
 
 // Persistence layer for Docker volume / local disk mounts
 const DATA_DIR = process.env.DATA_DIR || path.join(process.cwd(), "data");
@@ -178,6 +295,10 @@ function loadPersistedData() {
         memoryItems.length = 0;
         memoryItems.push(...data.memoryItems);
       }
+      if (Array.isArray(data.modelEndpoints) && data.modelEndpoints.length > 0) {
+        modelEndpoints.length = 0;
+        modelEndpoints.push(...data.modelEndpoints);
+      }
       if (data.settings && typeof data.settings === "object") {
         appSettings = { ...appSettings, ...data.settings };
       }
@@ -204,6 +325,7 @@ function savePersistedData() {
         calendarEvents,
         documents,
         memoryItems,
+        modelEndpoints,
         settings: appSettings,
       };
       fs.writeFileSync(DATA_FILE, JSON.stringify(data, null, 2), "utf-8");
@@ -213,8 +335,41 @@ function savePersistedData() {
   }, 250);
 }
 
-// Initial load from disk/volume if available
+function initStorageDirectories() {
+  try {
+    const uploadsDir = path.join(DATA_DIR, "uploads");
+    const docsDir = path.join(DATA_DIR, "documents");
+    if (!fs.existsSync(DATA_DIR)) {
+      fs.mkdirSync(DATA_DIR, { recursive: true });
+    }
+    if (!fs.existsSync(uploadsDir)) {
+      fs.mkdirSync(uploadsDir, { recursive: true });
+    }
+    if (!fs.existsSync(docsDir)) {
+      fs.mkdirSync(docsDir, { recursive: true });
+    }
+    if (!fs.existsSync(DATA_FILE)) {
+      const data = {
+        sessions: Array.from(sessions.values()),
+        notes,
+        tasks,
+        calendarEvents,
+        documents,
+        memoryItems,
+        modelEndpoints,
+        settings: appSettings,
+      };
+      fs.writeFileSync(DATA_FILE, JSON.stringify(data, null, 2), "utf-8");
+      console.log(`[Storage] Initialized persistent storage files and folders at ${DATA_DIR}`);
+    }
+  } catch (err) {
+    console.warn("[Storage] Notice on initStorageDirectories:", err);
+  }
+}
+
+// Initial load & directory initialization
 loadPersistedData();
+initStorageDirectories();
 
 // Helper: Serve HTML with CSP Nonce
 function serveHtmlWithNonce(res: express.Response, filePath: string) {
@@ -310,49 +465,230 @@ app.post(["/api/auth/login", "/api/auth/logout", "/api/auth/setup", "/api/auth/s
 });
 
 // ==================== MODELS & PROVIDERS ====================
-const geminiModels = [
-  {
-    endpoint_id: "gemini-cloud",
-    endpoint_name: "Google Gemini",
-    category: "api",
-    url: "/api/chat",
-    model_type: "llm",
-    models: ["gemini-2.5-flash", "gemini-2.5-pro"],
-    models_display: ["Gemini 2.5 Flash", "Gemini 2.5 Pro"],
-    models_extra: ["gemini-2.0-flash", "gemini-1.5-flash"],
-    models_extra_display: ["Gemini 2.0 Flash", "Gemini 1.5 Flash"],
-    offline: false,
-  },
-];
-
 app.get("/api/models", (req, res) => {
-  res.json({
-    items: geminiModels,
-  });
+  const items = modelEndpoints
+    .filter((ep) => ep.is_enabled)
+    .map((ep) => ({
+      endpoint_id: ep.id,
+      endpoint_name: ep.name,
+      category: ep.category || "api",
+      url: "/api/chat",
+      model_type: ep.model_type || "llm",
+      models: ep.models || [],
+      models_display: ep.models_display || ep.models || [],
+      models_extra: ep.models_extra || [],
+      models_extra_display: ep.models_extra_display || [],
+      offline: !ep.online,
+    }));
+  res.json({ items });
 });
 
 app.get("/api/model-endpoints", (req, res) => {
-  res.json([
-    {
-      id: "gemini-cloud",
-      name: "Google Gemini",
-      base_url: "https://generativelanguage.googleapis.com",
-      provider: "google",
-      is_enabled: true,
-      category: "api",
-      model_type: "llm",
-    },
-  ]);
+  res.json(modelEndpoints);
+});
+
+app.post("/api/model-endpoints/test", upload.any(), async (req, res) => {
+  const body = req.body || {};
+  let baseUrl = (body.base_url || "").toString().trim().replace(/\/+$/, "");
+  const apiKey = (body.api_key || "").toString().trim();
+  const provider = (body.provider || "").toString().trim();
+
+  if (!baseUrl && provider === "groq") {
+    baseUrl = "https://api.groq.com/openai/v1";
+  }
+
+  if (!baseUrl) {
+    return res.status(400).json({ ok: false, online: false, detail: "Base URL is required", ping_error: "Base URL is required" });
+  }
+
+  try {
+    const modelsUrl = baseUrl.endsWith("/v1")
+      ? `${baseUrl}/models`
+      : baseUrl.includes("/models")
+      ? baseUrl
+      : `${baseUrl}/v1/models`;
+
+    const headers: Record<string, string> = { Accept: "application/json" };
+    if (apiKey) {
+      headers["Authorization"] = `Bearer ${apiKey}`;
+    }
+
+    const testRes = await fetch(modelsUrl, {
+      method: "GET",
+      headers,
+      signal: AbortSignal.timeout(8000),
+    });
+
+    if (!testRes.ok) {
+      const errText = await testRes.text().catch(() => "");
+      return res.json({
+        ok: false,
+        online: false,
+        detail: `HTTP ${testRes.status}: ${errText.slice(0, 120) || testRes.statusText}`,
+        ping_error: `HTTP ${testRes.status}`,
+      });
+    }
+
+    const data: any = await testRes.json();
+    let modelList: string[] = [];
+    if (Array.isArray(data.data)) {
+      modelList = data.data.map((m: any) => m.id || m.name).filter(Boolean);
+    } else if (Array.isArray(data.models)) {
+      modelList = data.models.map((m: any) => m.name || m.id || m).filter(Boolean);
+    }
+
+    res.json({
+      ok: true,
+      online: true,
+      status: modelList.length > 0 ? "ok" : "empty",
+      models: modelList,
+    });
+  } catch (err: any) {
+    res.json({
+      ok: false,
+      online: false,
+      detail: err.name === "TimeoutError" ? "Connection timed out" : (err?.message || "Connection failed"),
+      ping_error: err?.message || "Connection failed",
+    });
+  }
+});
+
+app.post("/api/model-endpoints", upload.any(), async (req, res) => {
+  const body = req.body || {};
+  let baseUrl = (body.base_url || "").toString().trim().replace(/\/+$/, "");
+  const apiKey = (body.api_key || "").toString().trim();
+  const provider = (body.provider || "").toString().trim();
+  const modelType = (body.model_type || "llm").toString();
+
+  if (!baseUrl && provider === "groq") {
+    baseUrl = "https://api.groq.com/openai/v1";
+  }
+
+  if (!baseUrl) {
+    return res.status(400).json({ detail: "Base URL is required" });
+  }
+
+  let name = (body.name || "").toString().trim();
+  if (!name) {
+    if (baseUrl.includes("groq.com")) name = "Groq";
+    else if (baseUrl.includes("openai.com")) name = "OpenAI";
+    else if (baseUrl.includes("openrouter.ai")) name = "OpenRouter";
+    else if (baseUrl.includes("anthropic.com")) name = "Anthropic";
+    else if (baseUrl.includes("11434") || baseUrl.includes("ollama")) name = "Ollama";
+    else {
+      try {
+        name = new URL(baseUrl).hostname;
+      } catch (_) {
+        name = "Custom Endpoint";
+      }
+    }
+  }
+
+  let models: string[] = [];
+  try {
+    const modelsUrl = baseUrl.endsWith("/v1") ? `${baseUrl}/models` : `${baseUrl}/v1/models`;
+    const headers: Record<string, string> = { Accept: "application/json" };
+    if (apiKey) headers["Authorization"] = `Bearer ${apiKey}`;
+
+    const testRes = await fetch(modelsUrl, {
+      method: "GET",
+      headers,
+      signal: AbortSignal.timeout(6000),
+    });
+    if (testRes.ok) {
+      const data: any = await testRes.json();
+      if (Array.isArray(data.data)) {
+        models = data.data.map((m: any) => m.id || m.name).filter(Boolean);
+      } else if (Array.isArray(data.models)) {
+        models = data.models.map((m: any) => m.name || m.id || m).filter(Boolean);
+      }
+    }
+  } catch (_) {}
+
+  const endpoint: ModelEndpoint = {
+    id: `ep-${Date.now()}`,
+    name,
+    base_url: baseUrl,
+    api_key: apiKey || undefined,
+    api_key_fingerprint: apiKey ? apiKey.slice(0, 4) + "..." + apiKey.slice(-4) : undefined,
+    has_key: Boolean(apiKey),
+    provider: provider || (baseUrl.includes("groq.com") ? "groq" : undefined),
+    is_enabled: true,
+    online: true,
+    category: baseUrl.includes("localhost") || baseUrl.includes("127.0.0.1") || baseUrl.includes("host.docker.internal") ? "local" : "api",
+    model_type: modelType === "image" ? "image" : "llm",
+    models: models.length > 0 ? models : ["default"],
+    models_display: models.length > 0 ? models : [name],
+    model_count: models.length > 0 ? models.length : 1,
+  };
+
+  modelEndpoints.push(endpoint);
+  savePersistedData();
+
+  res.json({
+    ...endpoint,
+    status: models.length > 0 ? "ok" : "empty",
+  });
+});
+
+app.patch("/api/model-endpoints/:id", upload.any(), (req, res) => {
+  const ep = modelEndpoints.find((e) => e.id === req.params.id);
+  if (!ep) {
+    return res.status(404).json({ error: "Endpoint not found" });
+  }
+  ep.is_enabled = !ep.is_enabled;
+  ep.online = true;
+  savePersistedData();
+  res.json(ep);
+});
+
+app.delete("/api/model-endpoints/:id", (req, res) => {
+  const index = modelEndpoints.findIndex((ep) => ep.id === req.params.id);
+  if (index !== -1) {
+    modelEndpoints.splice(index, 1);
+    savePersistedData();
+  }
+  res.json({ ok: true, id: req.params.id });
+});
+
+app.get("/api/model-endpoints/:id/models", (req, res) => {
+  const ep = modelEndpoints.find((e) => e.id === req.params.id);
+  if (!ep) return res.status(404).json({ error: "Endpoint not found" });
+  res.json({ models: ep.models || [] });
+});
+
+app.get("/api/model-endpoints/:id/dependents", (req, res) => {
+  res.json({ sessions: 0, models: 0 });
 });
 
 app.get("/api/model-endpoints/probe-local", (req, res) => {
-  res.json({});
+  const result: Record<string, { alive: boolean }> = {};
+  for (const ep of modelEndpoints) {
+    result[ep.id] = { alive: true };
+  }
+  res.json(result);
+});
+
+app.post(["/api/probe-selected", "/api/probe"], (req, res) => {
+  res.json({ ok: true, results: {} });
+});
+
+app.get("/api/providers", (req, res) => {
+  res.json([
+    { id: "groq", name: "Groq", base_url: "https://api.groq.com/openai/v1" },
+    { id: "openai", name: "OpenAI", base_url: "https://api.openai.com/v1" },
+    { id: "openrouter", name: "OpenRouter", base_url: "https://openrouter.ai/api/v1" },
+    { id: "ollama", name: "Ollama", base_url: "http://localhost:11434/v1" },
+    { id: "anthropic", name: "Anthropic", base_url: "https://api.anthropic.com/v1" },
+  ]);
 });
 
 app.get("/api/default-chat", (req, res) => {
+  const firstEnabled = modelEndpoints.find((e) => e.is_enabled);
+  const model = firstEnabled?.models?.[0] || "gemini-2.5-flash";
   res.json({
-    model: "gemini-2.5-flash",
-    endpoint_id: "gemini-cloud",
+    model,
+    endpoint_id: firstEnabled?.id || "gemini-cloud",
     url: "/api/chat",
   });
 });
@@ -576,7 +912,81 @@ app.post("/api/chat_stream", upload.any(), async (req, res) => {
 
   let accumulatedReply = "";
 
-  if (ai && process.env.GEMINI_API_KEY) {
+  // 1. Check if model belongs to an OpenAI-compatible endpoint (Groq, OpenAI, Ollama, etc.)
+  const targetEndpoint =
+    modelEndpoints.find((ep) => ep.is_enabled && ep.base_url && ep.models?.includes(requestedModel)) ||
+    (!requestedModel.startsWith("gemini")
+      ? modelEndpoints.find((ep) => ep.is_enabled && ep.base_url && ep.id !== "gemini-cloud")
+      : null);
+
+  if (targetEndpoint && targetEndpoint.base_url && !requestedModel.startsWith("gemini")) {
+    const completionsUrl = targetEndpoint.base_url.endsWith("/v1")
+      ? `${targetEndpoint.base_url}/chat/completions`
+      : targetEndpoint.base_url.includes("/chat/completions")
+      ? targetEndpoint.base_url
+      : `${targetEndpoint.base_url}/v1/chat/completions`;
+
+    const headers: Record<string, string> = {
+      "Content-Type": "application/json",
+      Accept: "text/event-stream",
+    };
+    if (targetEndpoint.api_key) {
+      headers["Authorization"] = `Bearer ${targetEndpoint.api_key}`;
+    }
+
+    const openAiMessages = session.messages.map((m) => ({
+      role: m.role,
+      content: m.content,
+    }));
+
+    try {
+      const apiRes = await fetch(completionsUrl, {
+        method: "POST",
+        headers,
+        body: JSON.stringify({
+          model: requestedModel,
+          messages: openAiMessages,
+          stream: true,
+        }),
+      });
+
+      if (!apiRes.ok) {
+        const errBody = await apiRes.text().catch(() => "");
+        throw new Error(`HTTP ${apiRes.status}: ${errBody.slice(0, 150)}`);
+      }
+
+      const reader = apiRes.body?.getReader();
+      const decoder = new TextDecoder();
+      let buffer = "";
+
+      while (reader) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        buffer += decoder.decode(value, { stream: true });
+        const lines = buffer.split("\n");
+        buffer = lines.pop() || "";
+        for (const line of lines) {
+          const trimmed = line.trim();
+          if (!trimmed || !trimmed.startsWith("data:")) continue;
+          const raw = trimmed.slice(5).trim();
+          if (raw === "[DONE]") continue;
+          try {
+            const parsed = JSON.parse(raw);
+            const delta = parsed.choices?.[0]?.delta?.content || "";
+            if (delta) {
+              accumulatedReply += delta;
+              res.write(`data: ${JSON.stringify({ delta })}\n\n`);
+            }
+          } catch (_) {}
+        }
+      }
+    } catch (err: any) {
+      console.error(`${targetEndpoint.name} streaming error:`, err);
+      const errMessage = `\n\n*(${targetEndpoint.name} error: ${err?.message || "Failed to generate response"})*`;
+      accumulatedReply += errMessage;
+      res.write(`data: ${JSON.stringify({ delta: errMessage })}\n\n`);
+    }
+  } else if (ai && process.env.GEMINI_API_KEY) {
     try {
       // Prepare conversation history for Gemini
       const contents = session.messages.map((m) => ({
@@ -611,7 +1021,7 @@ app.post("/api/chat_stream", upload.any(), async (req, res) => {
     // Graceful fallback when GEMINI_API_KEY is not yet populated
     const fallbackText =
       `Hello! I received your message: "${messageText}".\n\n` +
-      `Odysseus is running successfully in AI Studio. To enable full Gemini model intelligence, make sure \`GEMINI_API_KEY\` is configured in the environment or Settings.`;
+      `Odysseus is running successfully. To enable model intelligence, configure \`GEMINI_API_KEY\`, \`GROQ_API_KEY\`, or add an endpoint in **Settings → Model Endpoints**.`;
 
     const words = fallbackText.split(" ");
     for (const word of words) {
@@ -750,22 +1160,194 @@ app.delete("/api/calendar/events/:id", (req, res) => {
 
 // ==================== DOCUMENTS & LIBRARY ====================
 app.get("/api/documents/library", (req, res) => {
+  const search = typeof req.query.search === "string" ? req.query.search.trim().toLowerCase() : "";
+  const language = typeof req.query.language === "string" ? req.query.language.trim() : "";
+  const sort = typeof req.query.sort === "string" ? req.query.sort : "recent";
+  const offset = parseInt(String(req.query.offset || "0"), 10) || 0;
+  const limit = Math.min(Math.max(parseInt(String(req.query.limit || "50"), 10) || 50, 1), 100);
+  const archived = req.query.archived === "true";
+
+  // Filter archived vs active
+  const baseList = documents.filter((d) => (archived ? !!d.archived : !d.archived));
+
+  // Compute language facets from the active/archived base set
+  const languages: Record<string, number> = {};
+  const sessionIds = new Set<string>();
+
+  for (const doc of baseList) {
+    const lang = doc.language || "text";
+    languages[lang] = (languages[lang] || 0) + 1;
+    if (doc.session_id) {
+      sessionIds.add(doc.session_id);
+    }
+  }
+
+  // Filter by search and language
+  let filtered = [...baseList];
+  if (search) {
+    const tokens = search.split(/\s+/).filter(Boolean);
+    filtered = filtered.filter((d) => {
+      const titleLower = (d.title || "").toLowerCase();
+      const contentLower = (d.content || d.current_content || "").toLowerCase();
+      return tokens.every((tok) => titleLower.includes(tok) || contentLower.includes(tok));
+    });
+  }
+
+  if (language) {
+    if (language === "text") {
+      filtered = filtered.filter((d) => !d.language || d.language === "text");
+    } else {
+      filtered = filtered.filter((d) => d.language === language);
+    }
+  }
+
+  // Sorting
+  if (sort === "oldest") {
+    filtered.sort((a, b) => (a.created_at || a.updated_at).localeCompare(b.created_at || b.updated_at));
+  } else if (sort === "alpha") {
+    filtered.sort((a, b) => (a.title || "").localeCompare(b.title || ""));
+  } else if (sort === "edits") {
+    filtered.sort((a, b) => (b.version_count || 1) - (a.version_count || 1));
+  } else {
+    // recent
+    filtered.sort((a, b) => (b.updated_at || "").localeCompare(a.updated_at || ""));
+  }
+
+  const total = filtered.length;
+  const paged = filtered.slice(offset, offset + limit).map((d) => ({
+    id: d.id,
+    session_id: d.session_id,
+    session_name: d.session_name || (d.session_id ? sessions.get(d.session_id)?.name : undefined),
+    title: d.title,
+    language: d.language || "text",
+    preview: d.preview || (d.content || d.current_content || "").slice(0, 500),
+    version_count: d.version_count || 1,
+    created_at: d.created_at || d.updated_at,
+    updated_at: d.updated_at,
+    content: d.content || d.current_content || "",
+    current_content: d.current_content || d.content || "",
+    archived: !!d.archived,
+  }));
+
   res.json({
-    documents,
-    total: documents.length,
+    documents: paged,
+    total,
+    languages,
+    session_count: sessionIds.size,
+  });
+});
+
+app.get("/api/documents/:sessionId", (req, res) => {
+  const list = documents
+    .filter((d) => d.session_id === req.params.sessionId && !d.archived)
+    .map((d) => ({
+      ...d,
+      current_content: d.current_content || d.content || "",
+      content: d.content || d.current_content || "",
+    }));
+  res.json(list);
+});
+
+app.get("/api/document/:id", (req, res) => {
+  const doc = documents.find((d) => d.id === req.params.id);
+  if (!doc) {
+    return res.status(404).json({ detail: "Document not found" });
+  }
+  res.json({
+    ...doc,
+    current_content: doc.current_content || doc.content || "",
+    content: doc.content || doc.current_content || "",
   });
 });
 
 app.post("/api/document", (req, res) => {
-  const { title = "Untitled", content = "" } = req.body || {};
-  const doc = {
+  const { title = "Untitled", content = "", language = "text", session_id } = req.body || {};
+  const now = new Date().toISOString();
+  const session = session_id ? sessions.get(session_id) : undefined;
+  const doc: DocumentItem = {
     id: crypto.randomUUID(),
-    title,
-    content,
-    updated_at: new Date().toISOString(),
+    session_id: session_id || undefined,
+    session_name: session ? session.name : undefined,
+    title: title || "Untitled",
+    content: content || "",
+    current_content: content || "",
+    language: language || "text",
+    preview: (content || "").slice(0, 500),
+    version_count: 1,
+    is_active: true,
+    archived: false,
+    created_at: now,
+    updated_at: now,
   };
   documents.unshift(doc);
+  savePersistedData();
   res.json(doc);
+});
+
+app.put("/api/document/:id", (req, res) => {
+  const doc = documents.find((d) => d.id === req.params.id);
+  if (!doc) {
+    return res.status(404).json({ detail: "Document not found" });
+  }
+  const { title, content, language } = req.body || {};
+  if (title !== undefined) doc.title = title;
+  if (content !== undefined) {
+    doc.content = content;
+    doc.current_content = content;
+    doc.preview = content.slice(0, 500);
+    doc.version_count = (doc.version_count || 1) + 1;
+  }
+  if (language !== undefined) doc.language = language;
+  doc.updated_at = new Date().toISOString();
+  savePersistedData();
+  res.json({
+    ...doc,
+    current_content: doc.content,
+    content: doc.content,
+  });
+});
+
+app.patch("/api/document/:id", (req, res) => {
+  const doc = documents.find((d) => d.id === req.params.id);
+  if (!doc) {
+    return res.status(404).json({ detail: "Document not found" });
+  }
+  const { title, content, language } = req.body || {};
+  if (title !== undefined) doc.title = title;
+  if (content !== undefined) {
+    doc.content = content;
+    doc.current_content = content;
+    doc.preview = content.slice(0, 500);
+  }
+  if (language !== undefined) doc.language = language;
+  doc.updated_at = new Date().toISOString();
+  savePersistedData();
+  res.json({
+    ...doc,
+    current_content: doc.content,
+    content: doc.content,
+  });
+});
+
+app.delete("/api/document/:id", (req, res) => {
+  const index = documents.findIndex((d) => d.id === req.params.id);
+  if (index !== -1) {
+    documents.splice(index, 1);
+    savePersistedData();
+  }
+  res.json({ ok: true, id: req.params.id });
+});
+
+app.post("/api/document/:id/archive", (req, res) => {
+  const doc = documents.find((d) => d.id === req.params.id);
+  if (!doc) {
+    return res.status(404).json({ detail: "Document not found" });
+  }
+  const toArchive = req.query.archived !== "false" && req.body?.archived !== false;
+  doc.archived = toArchive;
+  doc.updated_at = new Date().toISOString();
+  savePersistedData();
+  res.json({ ok: true, id: doc.id, archived: doc.archived });
 });
 
 // ==================== MEMORY, PRESETS, GALLERY, RESEARCH, EMAIL ====================
@@ -786,11 +1368,11 @@ app.get("/api/presets/groups", (req, res) => {
 });
 
 app.get("/api/gallery/library", (req, res) => {
-  res.json({ images: [], total: 0 });
+  res.json({ images: [], items: [], total: 0 });
 });
 
 app.get("/api/research/library", (req, res) => {
-  res.json({ items: [], total: 0 });
+  res.json({ items: [], research: [], total: 0 });
 });
 
 app.get("/api/email/accounts", (req, res) => {

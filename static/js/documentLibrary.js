@@ -334,14 +334,14 @@ let _libraryArchivedView = false;   // Documents tab showing archived docs?
       const data = await res.json();
 
       if (append) {
-        _libraryDocs = _libraryDocs.concat(data.documents);
+        _libraryDocs = _libraryDocs.concat(Array.isArray(data.documents) ? data.documents : []);
       } else {
-        _libraryDocs = data.documents;
+        _libraryDocs = Array.isArray(data.documents) ? data.documents : [];
         _docsVisibleLimit = 20;  // reset chunk on a fresh load / search / sort
       }
-      _libraryTotal = data.total;
-      _libraryLanguages = data.languages;
-      _librarySessionCount = data.session_count;
+      _libraryTotal = typeof data.total === 'number' ? data.total : _libraryDocs.length;
+      _libraryLanguages = (data && data.languages && typeof data.languages === 'object') ? data.languages : {};
+      _librarySessionCount = typeof data.session_count === 'number' ? data.session_count : 0;
 
       libraryRenderStats();
       libraryRenderLangChips();
@@ -355,7 +355,7 @@ let _libraryArchivedView = false;   // Documents tab showing archived docs?
   function libraryRenderStats() {
     const el = document.getElementById('doclib-stats');
     if (!el) return;
-    const totalAll = Object.values(_libraryLanguages).reduce((a, b) => a + b, 0);
+    const totalAll = Object.values(_libraryLanguages || {}).reduce((a, b) => a + b, 0);
     if (_librarySearch || _libraryActiveLanguage) {
       el.textContent = `${_libraryTotal} of ${totalAll} document${totalAll !== 1 ? 's' : ''}`;
     } else {
@@ -368,7 +368,7 @@ let _libraryArchivedView = false;   // Documents tab showing archived docs?
     if (!wrap) return;
     // Remove only language chip buttons, keep sort/select elements
     wrap.querySelectorAll('.memory-cat-chip').forEach(c => c.remove());
-    const totalAll = Object.values(_libraryLanguages).reduce((a, b) => a + b, 0);
+    const totalAll = Object.values(_libraryLanguages || {}).reduce((a, b) => a + b, 0);
 
     // Hide the "all (0)" chip + lang chips entirely when there are no docs.
     if (totalAll === 0) return;
@@ -390,7 +390,7 @@ let _libraryArchivedView = false;   // Documents tab showing archived docs?
     });
     wrap.appendChild(allChip);
 
-    const sorted = Object.entries(_libraryLanguages).sort((a, b) => b[1] - a[1]);
+    const sorted = Object.entries(_libraryLanguages || {}).sort((a, b) => b[1] - a[1]);
     for (const [lang, count] of sorted) {
       const chip = document.createElement('button');
       chip.className = 'memory-cat-chip' + (_libraryActiveLanguage === lang ? ' active' : '');
@@ -410,7 +410,7 @@ let _libraryArchivedView = false;   // Documents tab showing archived docs?
     _libraryTotal = Math.max(0, _libraryTotal - 1);
 
     const lang = removed && (removed.language || 'text');
-    if (lang && Object.prototype.hasOwnProperty.call(_libraryLanguages, lang)) {
+    if (lang && _libraryLanguages && Object.prototype.hasOwnProperty.call(_libraryLanguages, lang)) {
       const next = Math.max(0, Number(_libraryLanguages[lang] || 0) - 1);
       if (next > 0) {
         _libraryLanguages[lang] = next;
