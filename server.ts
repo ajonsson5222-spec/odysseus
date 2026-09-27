@@ -9,6 +9,16 @@ import { GoogleGenAI } from "@google/genai";
 
 dotenv.config();
 
+// Also attempt loading .env from data directory if mounted
+const DATA_DIR = process.env.DATA_DIR || path.join(process.cwd(), "data");
+const DATA_FILE = path.join(DATA_DIR, "odysseus.json");
+try {
+  const dataEnvPath = path.join(DATA_DIR, ".env");
+  if (fs.existsSync(dataEnvPath)) {
+    dotenv.config({ path: dataEnvPath, override: false });
+  }
+} catch (_) {}
+
 const app = express();
 const PORT = parseInt(process.env.PORT || "3000", 10);
 const HOST = process.env.HOST || "0.0.0.0";
@@ -18,14 +28,51 @@ app.use(cors());
 app.use(express.json({ limit: "50mb" }));
 app.use(express.urlencoded({ extended: true, limit: "50mb" }));
 
-// Initialize Gemini client (server-side only)
+// Forward-declare model endpoints for dynamic key lookups
 let genAIClient: GoogleGenAI | null = null;
+let configuredGeminiKey: string | null = null;
+
+function getActiveGeminiApiKey(): string | null {
+  if (process.env.GEMINI_API_KEY && process.env.GEMINI_API_KEY.trim()) {
+    return process.env.GEMINI_API_KEY.trim();
+  }
+  // Check endpoints array if initialized
+  if (typeof modelEndpoints !== "undefined" && Array.isArray(modelEndpoints)) {
+    const ep = modelEndpoints.find(
+      (e) => (e.provider === "gemini" || e.provider === "google" || e.id === "gemini-cloud" || e.base_url?.includes("generativelanguage.googleapis.com")) && e.api_key && e.api_key.trim()
+    );
+    if (ep && ep.api_key) return ep.api_key.trim();
+    const anyEp = modelEndpoints.find((e) => e.api_key && e.api_key.trim().startsWith("AIza"));
+    if (anyEp && anyEp.api_key) return anyEp.api_key.trim();
+  }
+  // Check appSettings if initialized
+  if (typeof appSettings !== "undefined" && (appSettings as any)?.gemini_api_key && typeof (appSettings as any).gemini_api_key === "string") {
+    return (appSettings as any).gemini_api_key.trim();
+  }
+  // Check DATA_DIR/.env directly
+  try {
+    const dataEnv = path.join(DATA_DIR, ".env");
+    if (fs.existsSync(dataEnv)) {
+      const parsed = dotenv.parse(fs.readFileSync(dataEnv, "utf-8"));
+      if (parsed.GEMINI_API_KEY && parsed.GEMINI_API_KEY.trim()) {
+        process.env.GEMINI_API_KEY = parsed.GEMINI_API_KEY.trim();
+        return parsed.GEMINI_API_KEY.trim();
+      }
+    }
+  } catch (_) {}
+  return null;
+}
+
 function getGenAI(): GoogleGenAI | null {
-  if (!genAIClient && process.env.GEMINI_API_KEY) {
+  const activeKey = getActiveGeminiApiKey();
+  if (!activeKey) return null;
+  if (!genAIClient || configuredGeminiKey !== activeKey) {
     try {
-      genAIClient = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY });
+      genAIClient = new GoogleGenAI({ apiKey: activeKey });
+      configuredGeminiKey = activeKey;
     } catch (err) {
       console.warn("Failed to initialize Google Gen AI client:", err);
+      return null;
     }
   }
   return genAIClient;
@@ -257,9 +304,150 @@ if (process.env.OLLAMA_HOST || process.env.LLM_HOST) {
 
 const modelEndpoints: Array<ModelEndpoint> = [...defaultModelEndpoints];
 
-// Persistence layer for Docker volume / local disk mounts
-const DATA_DIR = process.env.DATA_DIR || path.join(process.cwd(), "data");
-const DATA_FILE = path.join(DATA_DIR, "odysseus.json");
+function setActiveGeminiApiKey(key: string) {
+  const cleanKey = (key || "").trim();
+  if (!cleanKey) return;
+  process.env.GEMINI_API_KEY = cleanKey;
+  (appSettings as any).gemini_api_key = cleanKey;
+  genAIClient = null; // force reinit on next use
+  configuredGeminiKey = null;
+
+  let geminiEp = modelEndpoints.find((e) => e.id === "gemini-cloud" || e.provider === "gemini" || e.provider === "google");
+  if (!geminiEp) {
+    geminiEp = {
+      id: "gemini-cloud",
+      name: "Google Gemini",
+      base_url: "https://generativelanguage.googleapis.com/v1beta/openai",
+      provider: "gemini",
+      is_enabled: true,
+      online: true,
+      category: "api",
+      model_type: "llm",
+      models: ["gemini-2.5-flash", "gemini-2.5-pro", "gemini-2.0-flash", "gemini-1.5-flash"],
+      models_display: ["Gemini 2.5 Flash", "Gemini 2.5 Pro", "Gemini 2.0 Flash", "Gemini 1.5 Flash"],
+      model_count: 4,
+      has_key: true,
+      api_key: cleanKey,
+      api_key_fingerprint: cleanKey.slice(0, 4) + "..." + cleanKey.slice(-4),
+    };
+    modelEndpoints.unshift(geminiEp);
+  } else {
+    geminiEp.api_key = cleanKey;
+    geminiEp.api_key_fingerprint = cleanKey.slice(0, 4) + "..." + cleanKey.slice(-4);
+    geminiEp.has_key = true;
+    geminiEp.online = true;
+    geminiEp.models = ["gemini-2.5-flash", "gemini-2.5-pro", "gemini-2.0-flash", "gemini-1.5-flash"];
+    geminiEp.models_display = ["Gemini 2.5 Flash", "Gemini 2.5 Pro", "Gemini 2.0 Flash", "Gemini 1.5 Flash"];
+    geminiEp.model_count = 4;
+  }
+
+  // Also write to DATA_DIR/.env so host mounts stay persistent and easy to inspect
+  try {
+    const dataEnv = path.join(DATA_DIR, ".env");
+    let currentContent = fs.existsSync(dataEnv) ? fs.readFileSync(dataEnv, "utf-8") : "";
+    if (/^GEMINI_API_KEY=/m.test(currentContent)) {
+      currentContent = currentContent.replace(/^GEMINI_API_KEY=.*$/m, `GEMINI_API_KEY=${cleanKey}`);
+    } else {
+      currentContent = (currentContent ? currentContent.trimEnd() + "\n" : "") + `GEMINI_API_KEY=${cleanKey}\n`;
+    }
+    fs.writeFileSync(dataEnv, currentContent, "utf-8");
+  } catch (_) {}
+
+  savePersistedData();
+  console.log("[Auth] Active Gemini API Key successfully saved and enabled.");
+}
+
+function setActiveGroqApiKey(key: string) {
+  const cleanKey = (key || "").trim();
+  if (!cleanKey) return;
+  process.env.GROQ_API_KEY = cleanKey;
+  (appSettings as any).groq_api_key = cleanKey;
+
+  let groqEp = modelEndpoints.find((e) => e.id === "groq-cloud" || e.provider === "groq");
+  if (!groqEp) {
+    groqEp = {
+      id: "groq-cloud",
+      name: "Groq",
+      base_url: "https://api.groq.com/openai/v1",
+      api_key: cleanKey,
+      api_key_fingerprint: cleanKey.slice(0, 4) + "...",
+      has_key: true,
+      provider: "groq",
+      is_enabled: true,
+      online: true,
+      category: "api",
+      model_type: "llm",
+      models: ["llama-3.3-70b-versatile", "llama-3.1-8b-instant", "mixtral-8x7b-32768"],
+      models_display: ["Llama 3.3 70B", "Llama 3.1 8B", "Mixtral 8x7B"],
+      model_count: 3,
+    };
+    modelEndpoints.push(groqEp);
+  } else {
+    groqEp.api_key = cleanKey;
+    groqEp.api_key_fingerprint = cleanKey.slice(0, 4) + "...";
+    groqEp.has_key = true;
+    groqEp.online = true;
+  }
+
+  try {
+    const dataEnv = path.join(DATA_DIR, ".env");
+    let currentContent = fs.existsSync(dataEnv) ? fs.readFileSync(dataEnv, "utf-8") : "";
+    if (/^GROQ_API_KEY=/m.test(currentContent)) {
+      currentContent = currentContent.replace(/^GROQ_API_KEY=.*$/m, `GROQ_API_KEY=${cleanKey}`);
+    } else {
+      currentContent = (currentContent ? currentContent.trimEnd() + "\n" : "") + `GROQ_API_KEY=${cleanKey}\n`;
+    }
+    fs.writeFileSync(dataEnv, currentContent, "utf-8");
+  } catch (_) {}
+
+  savePersistedData();
+}
+
+function setActiveOpenAiApiKey(key: string) {
+  const cleanKey = (key || "").trim();
+  if (!cleanKey) return;
+  process.env.OPENAI_API_KEY = cleanKey;
+  (appSettings as any).openai_api_key = cleanKey;
+
+  let ep = modelEndpoints.find((e) => e.id === "openai-cloud" || e.provider === "openai");
+  if (!ep) {
+    ep = {
+      id: "openai-cloud",
+      name: "OpenAI",
+      base_url: "https://api.openai.com/v1",
+      api_key: cleanKey,
+      api_key_fingerprint: cleanKey.slice(0, 4) + "...",
+      has_key: true,
+      provider: "openai",
+      is_enabled: true,
+      online: true,
+      category: "api",
+      model_type: "llm",
+      models: ["gpt-4o", "gpt-4o-mini", "o3-mini"],
+      models_display: ["GPT-4o", "GPT-4o Mini", "o3 Mini"],
+      model_count: 3,
+    };
+    modelEndpoints.push(ep);
+  } else {
+    ep.api_key = cleanKey;
+    ep.api_key_fingerprint = cleanKey.slice(0, 4) + "...";
+    ep.has_key = true;
+    ep.online = true;
+  }
+
+  try {
+    const dataEnv = path.join(DATA_DIR, ".env");
+    let currentContent = fs.existsSync(dataEnv) ? fs.readFileSync(dataEnv, "utf-8") : "";
+    if (/^OPENAI_API_KEY=/m.test(currentContent)) {
+      currentContent = currentContent.replace(/^OPENAI_API_KEY=.*$/m, `OPENAI_API_KEY=${cleanKey}`);
+    } else {
+      currentContent = (currentContent ? currentContent.trimEnd() + "\n" : "") + `OPENAI_API_KEY=${cleanKey}\n`;
+    }
+    fs.writeFileSync(dataEnv, currentContent, "utf-8");
+  } catch (_) {}
+
+  savePersistedData();
+}
 
 function loadPersistedData() {
   try {
@@ -301,6 +489,27 @@ function loadPersistedData() {
       }
       if (data.settings && typeof data.settings === "object") {
         appSettings = { ...appSettings, ...data.settings };
+        if (data.settings.gemini_api_key && !process.env.GEMINI_API_KEY) {
+          process.env.GEMINI_API_KEY = data.settings.gemini_api_key;
+        }
+      }
+      // Inspect modelEndpoints for any stored Gemini key
+      const storedGemini = modelEndpoints.find(
+        (e) => (e.id === "gemini-cloud" || e.provider === "gemini") && e.api_key
+      );
+      if (storedGemini?.api_key && !process.env.GEMINI_API_KEY) {
+        process.env.GEMINI_API_KEY = storedGemini.api_key;
+      }
+      // Ensure gemini-cloud reflects active key
+      const activeGeminiKey = getActiveGeminiApiKey();
+      const geminiEp = modelEndpoints.find((e) => e.id === "gemini-cloud" || e.provider === "gemini");
+      if (geminiEp) {
+        geminiEp.has_key = Boolean(activeGeminiKey);
+        geminiEp.online = true;
+        if (activeGeminiKey) {
+          geminiEp.api_key = activeGeminiKey;
+          geminiEp.api_key_fingerprint = activeGeminiKey.slice(0, 4) + "..." + activeGeminiKey.slice(-4);
+        }
       }
       console.log(`[Storage] Loaded persisted workspace data from ${DATA_FILE}`);
     }
@@ -326,7 +535,10 @@ function savePersistedData() {
         documents,
         memoryItems,
         modelEndpoints,
-        settings: appSettings,
+        settings: {
+          ...appSettings,
+          gemini_api_key: getActiveGeminiApiKey() || undefined,
+        },
       };
       fs.writeFileSync(DATA_FILE, JSON.stringify(data, null, 2), "utf-8");
     } catch (err) {
@@ -434,7 +646,20 @@ app.get("/api/auth/settings", (req, res) => {
 });
 
 app.post("/api/auth/settings", (req, res) => {
-  appSettings = { ...appSettings, ...req.body };
+  const body = req.body || {};
+  appSettings = { ...appSettings, ...body };
+
+  if (body.gemini_api_key || body.GEMINI_API_KEY) {
+    setActiveGeminiApiKey(body.gemini_api_key || body.GEMINI_API_KEY);
+  }
+  if (body.groq_api_key || body.GROQ_API_KEY) {
+    setActiveGroqApiKey(body.groq_api_key || body.GROQ_API_KEY);
+  }
+  if (body.openai_api_key || body.OPENAI_API_KEY) {
+    setActiveOpenAiApiKey(body.openai_api_key || body.OPENAI_API_KEY);
+  }
+
+  savePersistedData();
   res.json(appSettings);
 });
 
@@ -491,7 +716,43 @@ app.post("/api/model-endpoints/test", upload.any(), async (req, res) => {
   const body = req.body || {};
   let baseUrl = (body.base_url || "").toString().trim().replace(/\/+$/, "");
   const apiKey = (body.api_key || "").toString().trim();
-  const provider = (body.provider || "").toString().trim();
+  const provider = (body.provider || "").toString().trim().toLowerCase();
+
+  const isGemini =
+    provider === "gemini" ||
+    provider === "google" ||
+    baseUrl.includes("generativelanguage.googleapis.com") ||
+    apiKey.startsWith("AIza");
+
+  if (isGemini) {
+    if (!apiKey) {
+      return res.status(400).json({ ok: false, online: false, detail: "API key is required for Google Gemini", ping_error: "API key required" });
+    }
+    try {
+      const testClient = new GoogleGenAI({ apiKey });
+      const testResult = await testClient.models.generateContent({
+        model: "gemini-2.5-flash",
+        contents: [{ role: "user", parts: [{ text: "ping" }] }],
+      });
+      if (testResult) {
+        setActiveGeminiApiKey(apiKey);
+        return res.json({
+          ok: true,
+          online: true,
+          status: "ok",
+          models: ["gemini-2.5-flash", "gemini-2.5-pro", "gemini-2.0-flash", "gemini-1.5-flash"],
+        });
+      }
+    } catch (err: any) {
+      console.warn("Gemini direct test error:", err?.message);
+      return res.json({
+        ok: false,
+        online: false,
+        detail: `Gemini verification failed: ${err?.message || "Invalid API key or network error"}`,
+        ping_error: err?.message || "Test failed",
+      });
+    }
+  }
 
   if (!baseUrl && provider === "groq") {
     baseUrl = "https://api.groq.com/openai/v1";
@@ -537,6 +798,12 @@ app.post("/api/model-endpoints/test", upload.any(), async (req, res) => {
       modelList = data.models.map((m: any) => m.name || m.id || m).filter(Boolean);
     }
 
+    if (apiKey.startsWith("gsk_") || baseUrl.includes("groq.com")) {
+      setActiveGroqApiKey(apiKey);
+    } else if (apiKey.startsWith("sk-") || baseUrl.includes("openai.com")) {
+      setActiveOpenAiApiKey(apiKey);
+    }
+
     res.json({
       ok: true,
       online: true,
@@ -557,8 +824,29 @@ app.post("/api/model-endpoints", upload.any(), async (req, res) => {
   const body = req.body || {};
   let baseUrl = (body.base_url || "").toString().trim().replace(/\/+$/, "");
   const apiKey = (body.api_key || "").toString().trim();
-  const provider = (body.provider || "").toString().trim();
+  const provider = (body.provider || "").toString().trim().toLowerCase();
   const modelType = (body.model_type || "llm").toString();
+
+  const isGemini =
+    provider === "gemini" ||
+    provider === "google" ||
+    baseUrl.includes("generativelanguage.googleapis.com") ||
+    apiKey.startsWith("AIza") ||
+    (body.name && body.name.toString().toLowerCase().includes("gemini"));
+
+  if (isGemini) {
+    if (apiKey) {
+      setActiveGeminiApiKey(apiKey);
+    }
+    const geminiEp = modelEndpoints.find((e) => e.id === "gemini-cloud" || e.provider === "gemini" || e.provider === "google");
+    if (geminiEp) {
+      return res.json({
+        ...geminiEp,
+        status: "ok",
+        models: geminiEp.models || ["gemini-2.5-flash", "gemini-2.5-pro", "gemini-2.0-flash", "gemini-1.5-flash"],
+      });
+    }
+  }
 
   if (!baseUrl && provider === "groq") {
     baseUrl = "https://api.groq.com/openai/v1";
@@ -586,7 +874,11 @@ app.post("/api/model-endpoints", upload.any(), async (req, res) => {
 
   let models: string[] = [];
   try {
-    const modelsUrl = baseUrl.endsWith("/v1") ? `${baseUrl}/models` : `${baseUrl}/v1/models`;
+    const modelsUrl = baseUrl.endsWith("/v1")
+      ? `${baseUrl}/models`
+      : baseUrl.includes("/models")
+      ? baseUrl
+      : `${baseUrl}/v1/models`;
     const headers: Record<string, string> = { Accept: "application/json" };
     if (apiKey) headers["Authorization"] = `Bearer ${apiKey}`;
 
@@ -621,6 +913,12 @@ app.post("/api/model-endpoints", upload.any(), async (req, res) => {
     models_display: models.length > 0 ? models : [name],
     model_count: models.length > 0 ? models.length : 1,
   };
+
+  if (apiKey.startsWith("gsk_") || baseUrl.includes("groq.com")) {
+    setActiveGroqApiKey(apiKey);
+  } else if (apiKey.startsWith("sk-") || baseUrl.includes("openai.com")) {
+    setActiveOpenAiApiKey(apiKey);
+  }
 
   modelEndpoints.push(endpoint);
   savePersistedData();
@@ -856,7 +1154,7 @@ app.get("/api/history/:id", (req, res) => {
 });
 
 // ==================== CHAT STREAMING ====================
-app.post("/api/chat_stream", upload.any(), async (req, res) => {
+app.post(["/api/chat_stream", "/api/chat"], upload.any(), async (req, res) => {
   const body = req.body || {};
   const messageText = (body.message || "").toString().trim();
   const sessionId = body.session || initialSessionId;
@@ -908,9 +1206,60 @@ app.post("/api/chat_stream", upload.any(), async (req, res) => {
   res.setHeader("X-Odysseus-Run-Id", `run-${Date.now()}`);
   res.flushHeaders?.();
 
-  const ai = getGenAI();
-
   let accumulatedReply = "";
+
+  // Check if message itself is or contains an API key
+  const geminiKeyMatch = messageText.match(/AIza[0-9A-Za-z_-]{35}/);
+  if (geminiKeyMatch) {
+    const key = geminiKeyMatch[0];
+    setActiveGeminiApiKey(key);
+    const reply =
+      `✅ **Google Gemini API Key detected and activated successfully!**\n\n` +
+      `Your key is saved to persistent storage. Gemini 2.5 Flash, Gemini 2.5 Pro, and Gemini 2.0 Flash are now ready.\n\n` +
+      `You can now chat directly with Odysseus!`;
+    const words = reply.split(" ");
+    for (const w of words) {
+      accumulatedReply += w + " ";
+      res.write(`data: ${JSON.stringify({ delta: w + " " })}\n\n`);
+      await new Promise((r) => setTimeout(r, 15));
+    }
+    session.messages.push({
+      role: "assistant",
+      content: accumulatedReply,
+      timestamp: new Date().toISOString(),
+    });
+    session.last_message_at = new Date().toISOString();
+    session.message_count = session.messages.length;
+    res.write("data: [DONE]\n\n");
+    res.end();
+    return;
+  }
+
+  const groqKeyMatch = messageText.match(/gsk_[0-9A-Za-z_-]{20,}/);
+  if (groqKeyMatch) {
+    const key = groqKeyMatch[0];
+    setActiveGroqApiKey(key);
+    const reply = `✅ **Groq API Key detected and activated successfully!**\n\nYour Groq models (Llama 3.3 70B, Llama 3.1 8B, Mixtral 8x7B) are now online.`;
+    const words = reply.split(" ");
+    for (const w of words) {
+      accumulatedReply += w + " ";
+      res.write(`data: ${JSON.stringify({ delta: w + " " })}\n\n`);
+      await new Promise((r) => setTimeout(r, 15));
+    }
+    session.messages.push({
+      role: "assistant",
+      content: accumulatedReply,
+      timestamp: new Date().toISOString(),
+    });
+    session.last_message_at = new Date().toISOString();
+    session.message_count = session.messages.length;
+    res.write("data: [DONE]\n\n");
+    res.end();
+    return;
+  }
+
+  const geminiKey = getActiveGeminiApiKey();
+  const ai = getGenAI();
 
   // 1. Check if model belongs to an OpenAI-compatible endpoint (Groq, OpenAI, Ollama, etc.)
   const targetEndpoint =
@@ -986,13 +1335,24 @@ app.post("/api/chat_stream", upload.any(), async (req, res) => {
       accumulatedReply += errMessage;
       res.write(`data: ${JSON.stringify({ delta: errMessage })}\n\n`);
     }
-  } else if (ai && process.env.GEMINI_API_KEY) {
+  } else if (ai && geminiKey) {
     try {
       // Prepare conversation history for Gemini
-      const contents = session.messages.map((m) => ({
-        role: m.role === "assistant" ? "model" : "user",
-        parts: [{ text: m.content }],
-      }));
+      const contents = session.messages
+        .filter((m) => m.content && m.content.trim() && (m.role === "user" || m.role === "assistant"))
+        .map((m) => ({
+          role: m.role === "assistant" ? "model" : "user",
+          parts: [{ text: m.content }],
+        }));
+
+      // Ensure the current user message is at the end of the history
+      const lastMsg = contents[contents.length - 1];
+      if (!lastMsg || lastMsg.role !== "user" || lastMsg.parts[0]?.text !== messageText) {
+        contents.push({
+          role: "user",
+          parts: [{ text: messageText }],
+        });
+      }
 
       // Pick model name
       const modelName = requestedModel.startsWith("gemini")
@@ -1013,7 +1373,7 @@ app.post("/api/chat_stream", upload.any(), async (req, res) => {
       }
     } catch (err: any) {
       console.error("Gemini API stream error:", err);
-      const errMessage = `\n\n*(Gemini API error: ${err?.message || "Failed to generate response"})*`;
+      const errMessage = `\n\n*(Gemini API error: ${err?.message || "Failed to generate response"}. Please check your Gemini API key.)*`;
       accumulatedReply += errMessage;
       res.write(`data: ${JSON.stringify({ delta: errMessage })}\n\n`);
     }
@@ -1021,14 +1381,18 @@ app.post("/api/chat_stream", upload.any(), async (req, res) => {
     // Graceful fallback when GEMINI_API_KEY is not yet populated
     const fallbackText =
       `Hello! I received your message: "${messageText}".\n\n` +
-      `Odysseus is running successfully. To enable model intelligence, configure \`GEMINI_API_KEY\`, \`GROQ_API_KEY\`, or add an endpoint in **Settings → Model Endpoints**.`;
+      `Odysseus is running successfully, but your **Gemini API Key** is not yet active.\n\n` +
+      `### ⚡ Quick Ways to Activate Gemini:\n` +
+      `1. **In this Chat**: Simply paste your key (starting with \`AIza...\`) directly into this chat box, or run: \`/setup gemini <YOUR_KEY>\`\n` +
+      `2. **In Settings**: Click the **⚙️ Settings** icon (in the bottom left) → **Services** → **Add API Models** → Pick **Google Gemini**, paste your key, and click **Add**.\n` +
+      `3. **In Docker**: Add \`GEMINI_API_KEY=YOUR_KEY\` to your stack environment variables or put it in \`./data/.env\`.`;
 
     const words = fallbackText.split(" ");
     for (const word of words) {
       const delta = word + " ";
       accumulatedReply += delta;
       res.write(`data: ${JSON.stringify({ delta })}\n\n`);
-      await new Promise((r) => setTimeout(r, 25));
+      await new Promise((r) => setTimeout(r, 20));
     }
   }
 
